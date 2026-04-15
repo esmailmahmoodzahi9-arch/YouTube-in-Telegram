@@ -6,11 +6,11 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import CommandStart
 
-# ================= TOKEN SAFETY =================
+# ================= TOKEN =================
 TOKEN = os.getenv("TOKEN")
 
 if not TOKEN:
-    raise ValueError("❌ TOKEN is not set in Railway Environment Variables!")
+    raise RuntimeError("❌ TOKEN is missing! Set it in Railway Variables.")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -27,7 +27,7 @@ async def start(message: types.Message):
     ])
 
     await message.answer(
-        "👋 سلام!\nبه ربات حرفه‌ای یوتیوب خوش آمدی",
+        "👋 سلام!\nبه ربات یوتیوب خوش آمدی",
         reply_markup=kb
     )
 
@@ -46,14 +46,14 @@ async def menu(call: types.CallbackQuery):
         await call.message.answer("🔎 اسم ویدیو یا کانال رو بفرست")
 
 
-# ================= TEXT HANDLER =================
+# ================= TEXT =================
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     uid = message.from_user.id
     text = message.text.strip()
     state = user_state.get(uid, {})
 
-    # ---------- DOWNLOAD MODE ----------
+    # ---------- DOWNLOAD ----------
     if state.get("mode") == "download" and (
         "youtube.com" in text or "youtu.be" in text
     ):
@@ -65,10 +65,11 @@ async def handle_text(message: types.Message):
         ])
 
         await message.answer("فرمت رو انتخاب کن:", reply_markup=kb)
+        return
 
 
-    # ---------- BROWSE MODE ----------
-    elif state.get("mode") == "browse":
+    # ---------- BROWSE ----------
+    if state.get("mode") == "browse":
 
         await message.answer("🔎 در حال جستجو...")
 
@@ -78,29 +79,32 @@ async def handle_text(message: types.Message):
             "default_search": "ytsearch10"
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(text, download=False)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(text, download=False)
 
-        entries = info.get("entries", [])
+            entries = info.get("entries", [])
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[])
+            kb = InlineKeyboardMarkup(inline_keyboard=[])
 
-        for e in entries[:6]:
-            video_id = e.get("id")
-            if not video_id:
-                continue
+            for e in entries[:6]:
+                if not e.get("id"):
+                    continue
 
-            kb.inline_keyboard.append([
-                InlineKeyboardButton(
-                    text=e.get("title", "video"),
-                    callback_data=f"video|{video_id}"
-                )
-            ])
+                kb.inline_keyboard.append([
+                    InlineKeyboardButton(
+                        text=e.get("title", "video"),
+                        callback_data=f"video|{e['id']}"
+                    )
+                ])
 
-        await message.answer("📺 نتایج:", reply_markup=kb)
+            await message.answer("📺 نتایج:", reply_markup=kb)
+
+        except Exception as e:
+            await message.answer(f"❌ خطا در جستجو:\n{e}")
 
 
-# ================= SELECT VIDEO =================
+# ================= VIDEO SELECT =================
 @dp.callback_query(F.data.startswith("video|"))
 async def select_video(call: types.CallbackQuery):
     await call.answer()
@@ -129,7 +133,6 @@ def download_video(url, mode):
             }]
         }
     else:
-        # پایدارتر برای Railway
         opts = {
             "format": "best",
             "outtmpl": "video.%(ext)s"
@@ -137,9 +140,7 @@ def download_video(url, mode):
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-
-    return filename
+        return ydl.prepare_filename(info)
 
 
 # ================= DOWNLOAD HANDLER =================
@@ -162,17 +163,17 @@ async def download_handler(call: types.CallbackQuery):
         else:
             await call.message.answer_video(types.FSInputFile(file_path))
 
-        # پاکسازی فایل بعد از ارسال
+        # پاکسازی فایل
         try:
             os.remove(file_path)
         except:
             pass
 
     except Exception as e:
-        await call.message.answer(f"❌ خطا در دانلود یا ارسال:\n{e}")
+        await call.message.answer(f"❌ خطا:\n{e}")
 
 
-# ================= RUN BOT =================
+# ================= RUN =================
 async def main():
     await dp.start_polling(bot)
 
