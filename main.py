@@ -11,7 +11,7 @@ from aiogram.filters import CommandStart
 TOKEN = os.getenv("TOKEN")
 
 if not TOKEN:
-    raise RuntimeError("TOKEN is missing in environment variables")
+    raise RuntimeError("TOKEN missing in environment variables")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -39,11 +39,10 @@ def progress_hook(d):
     if d.get("status") == "downloading":
         downloaded = d.get("downloaded_bytes", 0)
         total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
-
         progress["percent"] = int(downloaded * 100 / total)
 
 
-# ================= START (FIX 1) =================
+# ================= START =================
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
@@ -66,7 +65,7 @@ async def router(call: types.CallbackQuery):
         await call.message.answer("🔎 اسم ویدیو رو بفرست")
 
     elif call.data == "home":
-        await call.message.answer("🏠 منو اصلی", reply_markup=menu())
+        await call.message.answer("🏠 منو", reply_markup=menu())
 
 
 # ================= TEXT HANDLER =================
@@ -82,73 +81,100 @@ async def text_handler(message: types.Message):
             await message.answer("❌ لینک نامعتبره")
             return
 
-        user_state[uid]["url"] = text
+        user_state[uid] = {
+            "mode": "download",
+            "url": text
+        }
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎵 دانلود آهنگ", callback_data="mp3")],
-            [InlineKeyboardButton(text="🎬 دانلود ویدیو", callback_data="mp4")],
+            [InlineKeyboardButton(text="🎬 دانلود ویدیو (انتخاب کیفیت)", callback_data="mp4")],
             [InlineKeyboardButton(text="🏠 منو", callback_data="home")]
         ])
 
         await message.answer("یکی رو انتخاب کن:", reply_markup=kb)
 
 
-# ================= GET FORMATS (FIX 2) =================
+# ================= GET FORMATS =================
 def get_formats(url):
-    with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+    ydl_opts = {"quiet": True}
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
     formats = []
+    seen = set()
 
     for f in info.get("formats", []):
-        if f.get("vcodec") != "none" and f.get("height") in [360, 720, 1080]:
+        h = f.get("height")
+        fid = f.get("format_id")
+
+        if h in [360, 720, 1080] and fid not in seen:
+            seen.add(fid)
             formats.append({
-                "id": f["format_id"],
-                "height": f.get("height")
+                "id": fid,
+                "height": h
             })
 
     return formats
 
 
-# ================= MP4 QUALITY MENU =================
+# ================= QUALITY MENU (FIX 1) =================
 @dp.callback_query(F.data == "mp4")
 async def mp4(call: types.CallbackQuery):
     await call.answer()
 
-    url = user_state.get(call.from_user.id, {}).get("url")
+    uid = call.from_user.id
+    url = user_state.get(uid, {}).get("url")
 
     if not url:
         await call.message.answer("❌ لینک پیدا نشد")
         return
 
-    formats = get_formats(url)
+    try:
+        formats = get_formats(url)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
+        if not formats:
+            await call.message.answer("❌ کیفیتی پیدا نشد")
+            return
 
-    for f in formats:
+        kb = InlineKeyboardMarkup(inline_keyboard=[])
+
+        for f in formats:
+            # ❗ فقط format_id می‌فرستیم (بدون URL)
+            kb.inline_keyboard.append([
+                InlineKeyboardButton(
+                    text=f"🎬 {f['height']}p",
+                    callback_data=f"dl|{f['id']}"
+                )
+            ])
+
         kb.inline_keyboard.append([
-            InlineKeyboardButton(
-                text=f"🎬 {f['height']}p",
-                callback_data=f"dl|{f['id']}|{url}"
-            )
+            InlineKeyboardButton(text="🏠 منو", callback_data="home")
         ])
 
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(text="🏠 منو", callback_data="home")
-    ])
+        await call.message.answer("🎥 کیفیت رو انتخاب کن:", reply_markup=kb)
 
-    await call.message.answer("🎥 کیفیت رو انتخاب کن:", reply_markup=kb)
+    except Exception as e:
+        await call.message.answer(f"❌ خطا در گرفتن کیفیت:\n{e}")
 
 
-# ================= DOWNLOAD VIDEO =================
+# ================= DOWNLOAD VIDEO (FIX 2) =================
 @dp.callback_query(F.data.startswith("dl|"))
 async def download_video(call: types.CallbackQuery):
     await call.answer()
 
     try:
-        _, format_id, url = call.data.split("|")
+        _, format_id = call.data.split("|")
 
-        msg = await call.message.answer("⬇️ شروع دانلود...\n▱▱▱▱▱▱▱▱▱▱ 0%")
+        uid = call.from_user.id
+        url = user_state.get(uid, {}).get("url")
+
+        if not url:
+            await call.message.answer("❌ لینک پیدا نشد")
+            return
+
+        msg = await call.message.answer("⬇️ شروع دانلود...\n0%")
 
         progress["percent"] = 0
 
@@ -177,7 +203,13 @@ async def download_video(call: types.CallbackQuery):
                 "outtmpl": "video.%(ext)s",
                 "progress_hooks": [progress_hook],
                 "quiet": True,
-                "nocheckcertificate": True
+                "nocheckcertificate": True,
+                "retries": 10,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android", "web"]
+                    }
+                }
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -196,18 +228,19 @@ async def download_video(call: types.CallbackQuery):
         await call.message.answer(f"❌ خطا:\n{e}")
 
 
-# ================= MP3 DOWNLOAD =================
+# ================= MP3 (FIX 3 - ffmpeg issue still depends on server) =================
 @dp.callback_query(F.data == "mp3")
 async def mp3(call: types.CallbackQuery):
     await call.answer()
 
-    url = user_state.get(call.from_user.id, {}).get("url")
+    uid = call.from_user.id
+    url = user_state.get(uid, {}).get("url")
 
     if not url:
         await call.message.answer("❌ لینک پیدا نشد")
         return
 
-    msg = await call.message.answer("⬇️ ساخت MP3...\n▱▱▱▱▱▱▱▱▱▱ 0%")
+    msg = await call.message.answer("⬇️ ساخت MP3...\n0%")
 
     progress["percent"] = 0
 
@@ -236,6 +269,7 @@ async def mp3(call: types.CallbackQuery):
             "outtmpl": "audio.%(ext)s",
             "progress_hooks": [progress_hook],
             "quiet": True,
+            "retries": 10,
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
