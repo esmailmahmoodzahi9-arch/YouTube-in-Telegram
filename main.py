@@ -11,25 +11,25 @@ from aiogram.filters import CommandStart
 TOKEN = os.getenv("TOKEN")
 
 if not TOKEN:
-    raise RuntimeError("TOKEN is missing in Railway Variables")
+    raise RuntimeError("TOKEN is missing in environment variables")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # ================= STATE =================
 user_state = {}
-download_progress = {}
+progress = {}
 
 
 # ================= MENU =================
 def menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 دانلود از یوتیوب", callback_data="download")],
+        [InlineKeyboardButton(text="📥 دانلود یوتیوب", callback_data="download")],
         [InlineKeyboardButton(text="🔎 یوتیوب گردی", callback_data="browse")]
     ])
 
 
-# ================= PROGRESS BAR =================
+# ================= PROGRESS =================
 def bar(p):
     p = max(0, min(100, p))
     return "▰" * (p // 10) + "▱" * (10 - (p // 10))
@@ -40,11 +40,10 @@ def progress_hook(d):
         downloaded = d.get("downloaded_bytes", 0)
         total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
 
-        percent = int(downloaded * 100 / total)
-        download_progress["percent"] = percent
+        progress["percent"] = int(downloaded * 100 / total)
 
 
-# ================= START =================
+# ================= START (FIX 1) =================
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
@@ -53,7 +52,7 @@ async def start(message: types.Message):
     )
 
 
-# ================= SAFE CALLBACK ROUTER =================
+# ================= ROUTER =================
 @dp.callback_query(F.data.in_(["download", "browse", "home"]))
 async def router(call: types.CallbackQuery):
     await call.answer()
@@ -77,11 +76,10 @@ async def text_handler(message: types.Message):
     text = message.text.strip()
     state = user_state.get(uid, {})
 
-    # ---------- DOWNLOAD MODE ----------
     if state.get("mode") == "download":
 
         if "youtube.com" not in text and "youtu.be" not in text:
-            await message.answer("❌ لینک معتبر نیست")
+            await message.answer("❌ لینک نامعتبره")
             return
 
         user_state[uid]["url"] = text
@@ -93,32 +91,26 @@ async def text_handler(message: types.Message):
         ])
 
         await message.answer("یکی رو انتخاب کن:", reply_markup=kb)
-        return
 
 
-# ================= SAFE YT-DLP OPTIONS =================
-def base_opts():
-    return {
-        "quiet": True,
-        "nocheckcertificate": True,
-        "retries": 10,
-        "fragment_retries": 10,
-        "continuedl": True,
-        "sleep_interval": 1,
-        "max_sleep_interval": 3,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        },
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"]
-            }
-        },
-        "progress_hooks": [progress_hook],
-    }
+# ================= GET FORMATS (FIX 2) =================
+def get_formats(url):
+    with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    formats = []
+
+    for f in info.get("formats", []):
+        if f.get("vcodec") != "none" and f.get("height") in [360, 720, 1080]:
+            formats.append({
+                "id": f["format_id"],
+                "height": f.get("height")
+            })
+
+    return formats
 
 
-# ================= VIDEO DOWNLOAD =================
+# ================= MP4 QUALITY MENU =================
 @dp.callback_query(F.data == "mp4")
 async def mp4(call: types.CallbackQuery):
     await call.answer()
@@ -129,39 +121,69 @@ async def mp4(call: types.CallbackQuery):
         await call.message.answer("❌ لینک پیدا نشد")
         return
 
-    msg = await call.message.answer("⬇️ شروع دانلود...\n▱▱▱▱▱▱▱▱▱▱ 0%")
+    formats = get_formats(url)
 
-    download_progress["percent"] = 0
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
 
-    async def updater():
-        last = 0
-        while True:
-            p = download_progress.get("percent", 0)
+    for f in formats:
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"🎬 {f['height']}p",
+                callback_data=f"dl|{f['id']}|{url}"
+            )
+        ])
 
-            if time.time() - last > 1:
-                try:
-                    await msg.edit_text(f"⬇️ در حال دانلود...\n{bar(p)} {p}%")
-                    last = time.time()
-                except:
-                    pass
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🏠 منو", callback_data="home")
+    ])
 
-            if p >= 100:
-                break
+    await call.message.answer("🎥 کیفیت رو انتخاب کن:", reply_markup=kb)
 
-            await asyncio.sleep(1)
 
-    task = asyncio.create_task(updater())
-
-    def run():
-        opts = base_opts()
-        opts["format"] = "best[height<=720]/best"
-        opts["outtmpl"] = "video.%(ext)s"
-
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            return ydl.prepare_filename(info)
+# ================= DOWNLOAD VIDEO =================
+@dp.callback_query(F.data.startswith("dl|"))
+async def download_video(call: types.CallbackQuery):
+    await call.answer()
 
     try:
+        _, format_id, url = call.data.split("|")
+
+        msg = await call.message.answer("⬇️ شروع دانلود...\n▱▱▱▱▱▱▱▱▱▱ 0%")
+
+        progress["percent"] = 0
+
+        async def updater():
+            last = 0
+            while True:
+                p = progress.get("percent", 0)
+
+                if time.time() - last > 1:
+                    try:
+                        await msg.edit_text(f"⬇️ در حال دانلود...\n{bar(p)} {p}%")
+                        last = time.time()
+                    except:
+                        pass
+
+                if p >= 100:
+                    break
+
+                await asyncio.sleep(1)
+
+        task = asyncio.create_task(updater())
+
+        def run():
+            ydl_opts = {
+                "format": format_id,
+                "outtmpl": "video.%(ext)s",
+                "progress_hooks": [progress_hook],
+                "quiet": True,
+                "nocheckcertificate": True
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                return ydl.prepare_filename(info)
+
         file_path = await asyncio.to_thread(run)
 
         task.cancel()
@@ -171,7 +193,7 @@ async def mp4(call: types.CallbackQuery):
         await call.message.answer_video(types.FSInputFile(file_path))
 
     except Exception as e:
-        await call.message.answer(f"❌ خطا در دانلود:\n{e}")
+        await call.message.answer(f"❌ خطا:\n{e}")
 
 
 # ================= MP3 DOWNLOAD =================
@@ -187,12 +209,12 @@ async def mp3(call: types.CallbackQuery):
 
     msg = await call.message.answer("⬇️ ساخت MP3...\n▱▱▱▱▱▱▱▱▱▱ 0%")
 
-    download_progress["percent"] = 0
+    progress["percent"] = 0
 
     async def updater():
         last = 0
         while True:
-            p = download_progress.get("percent", 0)
+            p = progress.get("percent", 0)
 
             if time.time() - last > 1:
                 try:
@@ -209,18 +231,19 @@ async def mp3(call: types.CallbackQuery):
     task = asyncio.create_task(updater())
 
     def run():
-        opts = base_opts()
-        opts.update({
+        ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": "audio.%(ext)s",
+            "progress_hooks": [progress_hook],
+            "quiet": True,
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": "192"
             }]
-        })
+        }
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             return ydl.prepare_filename(info)
 
@@ -229,7 +252,7 @@ async def mp3(call: types.CallbackQuery):
 
         task.cancel()
 
-        await msg.edit_text("📤 در حال ارسال فایل...")
+        await msg.edit_text("📤 ارسال فایل...")
 
         await call.message.answer_audio(types.FSInputFile(file_path))
 
