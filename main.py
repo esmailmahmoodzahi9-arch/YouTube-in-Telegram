@@ -6,7 +6,11 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import CommandStart
 
+# ================= TOKEN SAFETY =================
 TOKEN = os.getenv("TOKEN")
+
+if not TOKEN:
+    raise ValueError("❌ TOKEN is not set in Railway Environment Variables!")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -42,16 +46,17 @@ async def menu(call: types.CallbackQuery):
         await call.message.answer("🔎 اسم ویدیو یا کانال رو بفرست")
 
 
-# ================= TEXT =================
+# ================= TEXT HANDLER =================
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     uid = message.from_user.id
-    text = message.text
+    text = message.text.strip()
     state = user_state.get(uid, {})
 
-    # ---------- DOWNLOAD ----------
-    if state.get("mode") == "download" and ("youtube.com" in text or "youtu.be" in text):
-
+    # ---------- DOWNLOAD MODE ----------
+    if state.get("mode") == "download" and (
+        "youtube.com" in text or "youtu.be" in text
+    ):
         user_state[uid]["url"] = text
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -62,7 +67,7 @@ async def handle_text(message: types.Message):
         await message.answer("فرمت رو انتخاب کن:", reply_markup=kb)
 
 
-    # ---------- BROWSE ----------
+    # ---------- BROWSE MODE ----------
     elif state.get("mode") == "browse":
 
         await message.answer("🔎 در حال جستجو...")
@@ -81,10 +86,14 @@ async def handle_text(message: types.Message):
         kb = InlineKeyboardMarkup(inline_keyboard=[])
 
         for e in entries[:6]:
+            video_id = e.get("id")
+            if not video_id:
+                continue
+
             kb.inline_keyboard.append([
                 InlineKeyboardButton(
                     text=e.get("title", "video"),
-                    callback_data=f"video|{e['url']}"
+                    callback_data=f"video|{video_id}"
                 )
             ])
 
@@ -96,7 +105,8 @@ async def handle_text(message: types.Message):
 async def select_video(call: types.CallbackQuery):
     await call.answer()
 
-    url = call.data.split("|")[1]
+    video_id = call.data.split("|")[1]
+    url = f"https://www.youtube.com/watch?v={video_id}"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎬 MP4", callback_data=f"dlmp4|{url}")],
@@ -107,7 +117,7 @@ async def select_video(call: types.CallbackQuery):
 
 
 # ================= DOWNLOAD ENGINE =================
-async def download_video(url, mode):
+def download_video(url, mode):
     if mode == "mp3":
         opts = {
             "format": "bestaudio/best",
@@ -119,8 +129,9 @@ async def download_video(url, mode):
             }]
         }
     else:
+        # پایدارتر برای Railway
         opts = {
-            "format": "bestvideo+bestaudio/best",
+            "format": "best",
             "outtmpl": "video.%(ext)s"
         }
 
@@ -136,28 +147,35 @@ async def download_video(url, mode):
 async def download_handler(call: types.CallbackQuery):
     await call.answer()
 
-    uid = call.from_user.id
     url = call.data.split("|")[1]
     mode = "mp3" if "mp3" in call.data else "mp4"
 
     await call.message.answer("⏳ در حال دانلود...")
 
-    file_path = await asyncio.to_thread(download_video, url, mode)
-
-    await call.message.answer("📤 در حال ارسال فایل...")
-
     try:
+        file_path = await asyncio.to_thread(download_video, url, mode)
+
+        await call.message.answer("📤 در حال ارسال فایل...")
+
         if mode == "mp3":
             await call.message.answer_audio(types.FSInputFile(file_path))
         else:
             await call.message.answer_video(types.FSInputFile(file_path))
+
+        # پاکسازی فایل بعد از ارسال
+        try:
+            os.remove(file_path)
+        except:
+            pass
+
     except Exception as e:
-        await call.message.answer(f"❌ خطا در ارسال: {e}")
+        await call.message.answer(f"❌ خطا در دانلود یا ارسال:\n{e}")
 
 
-# ================= RUN =================
+# ================= RUN BOT =================
 async def main():
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
