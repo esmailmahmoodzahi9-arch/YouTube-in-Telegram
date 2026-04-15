@@ -1,8 +1,6 @@
 import asyncio
-import aiohttp
 import os
-import re
-
+import yt_dlp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import CommandStart
@@ -18,183 +16,102 @@ user_state = {}
 # ================= MENU =================
 def menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 دانلود یوتیوب", callback_data="download")],
-        [InlineKeyboardButton(text="🔎 جستجو", callback_data="search")]
+        [InlineKeyboardButton(text="📥 دانلود یوتیوب", callback_data="download")]
     ])
-
-
-# ================= EXTRACT ID =================
-def extract_id(url):
-    if "youtu.be" in url:
-        return url.split("/")[-1].split("?")[0]
-    if "watch?v=" in url:
-        return url.split("watch?v=")[1].split("&")[0]
-    return None
-
-
-# ================= SEARCH (Piped API - STABLE) =================
-async def search(query):
-    url = f"https://pipedapi.kavin.rocks/search?q={query}"
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as r:
-            data = await r.json()
-
-    return data.get("items", [])[:6]
-
-
-# ================= VIDEO INFO =================
-async def video_info(video_id):
-    url = f"https://pipedapi.kavin.rocks/streams/{video_id}"
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as r:
-            return await r.json()
 
 
 # ================= START =================
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("👋 ربات فعال شد", reply_markup=menu())
+    user_state[message.from_user.id] = {}
+
+    await message.answer("👋 ربات آماده است", reply_markup=menu())
 
 
 # ================= MENU =================
-@dp.callback_query(F.data.in_(["download", "search"]))
-async def menu_handler(call: types.CallbackQuery):
+@dp.callback_query(F.data == "download")
+async def download_mode(call: types.CallbackQuery):
     await call.answer()
+    user_state[call.from_user.id] = {"mode": "download"}
 
-    if call.data == "search":
-        user_state[call.from_user.id] = {"mode": "search"}
-        await call.message.answer("🔎 اسم ویدیو رو بفرست")
-
-    elif call.data == "download":
-        user_state[call.from_user.id] = {"mode": "download"}
-        await call.message.answer("📥 لینک یوتیوب رو بفرست")
+    await call.message.answer("📥 لینک یوتیوب رو بفرست")
 
 
-# ================= TEXT =================
+# ================= DOWNLOAD ENGINE =================
+def download_video(url, mode="mp4"):
+    if mode == "mp3":
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": "audio.%(ext)s",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192"
+            }]
+        }
+    else:
+        opts = {
+            "format": "best[ext=mp4]/best",
+            "outtmpl": "video.%(ext)s"
+        }
+
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        return ydl.prepare_filename(info)
+
+
+# ================= HANDLER =================
 @dp.message(F.text)
 async def handler(message: types.Message):
     uid = message.from_user.id
     text = message.text.strip()
     state = user_state.get(uid, {})
 
-    # ---------- SEARCH ----------
-    if state.get("mode") == "search":
-
-        results = await search(text)
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[])
-
-        for v in results:
-            vid = v.get("url", "").split("v=")[-1] if v.get("url") else v.get("id")
-
-            kb.inline_keyboard.append([
-                InlineKeyboardButton(
-                    text=v.get("title", "video")[:40],
-                    callback_data=f"vid|{vid}"
-                )
-            ])
-
-        await message.answer("📺 نتایج:", reply_markup=kb)
-
-
-    # ---------- DOWNLOAD ----------
-    elif state.get("mode") == "download":
-
-        vid = extract_id(text)
-
-        if not vid:
-            await message.answer("❌ لینک اشتباهه")
-            return
-
-        data = await video_info(vid)
-
-        formats = data.get("videoStreams", [])
-        audio = data.get("audioStreams", [])
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[])
-
-        # ================= VIDEO QUALITIES =================
-        seen = set()
-
-        for f in formats:
-            q = f.get("quality")
-            url = f.get("url")
-
-            if q and url and q not in seen:
-                seen.add(q)
-
-                kb.inline_keyboard.append([
-                    InlineKeyboardButton(
-                        text=f"🎬 دانلود {q}",
-                        callback_data=f"vdl|{vid}|{q}"
-                    )
-                ])
-
-        # ================= AUDIO =================
-        if audio:
-            kb.inline_keyboard.append([
-                InlineKeyboardButton(
-                    text="🎵 دانلود آهنگ",
-                    callback_data=f"adl|{vid}"
-                )
-            ])
-
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text="🏠 منو", callback_data="home")
-        ])
-
-        await message.answer("👇 انتخاب کن:", reply_markup=kb)
-
-
-# ================= VIDEO DOWNLOAD =================
-@dp.callback_query(F.data.startswith("vdl|"))
-async def video_dl(call: types.CallbackQuery):
-    await call.answer()
-
-    _, vid, quality = call.data.split("|")
-
-    data = await video_info(vid)
-
-    url = None
-
-    for f in data.get("videoStreams", []):
-        if f.get("quality") == quality:
-            url = f.get("url")
-            break
-
-    if not url:
-        await call.message.answer("❌ کیفیت پیدا نشد")
+    if state.get("mode") != "download":
         return
 
-    await call.message.answer_video(types.FSInputFile(url))
-
-
-# ================= AUDIO DOWNLOAD =================
-@dp.callback_query(F.data.startswith("adl|"))
-async def audio_dl(call: types.CallbackQuery):
-    await call.answer()
-
-    vid = call.data.split("|")[1]
-
-    data = await video_info(vid)
-
-    audio = data.get("audioStreams", [])
-
-    if not audio:
-        await call.message.answer("❌ صوت پیدا نشد")
+    if "youtube" not in text and "youtu.be" not in text:
+        await message.answer("❌ لینک معتبر نیست")
         return
 
-    url = audio[0]["url"]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🎬 دانلود ویدیو", callback_data=f"mp4|{text}")
+        ],
+        [
+            InlineKeyboardButton(text="🎵 دانلود آهنگ", callback_data=f"mp3|{text}")
+        ]
+    ])
 
-    await call.message.answer_audio(types.FSInputFile(url))
+    await message.answer("👇 انتخاب کن:", reply_markup=kb)
+
+
+# ================= CALLBACK =================
+@dp.callback_query(F.data.startswith("mp"))
+async def dl(call: types.CallbackQuery):
+    await call.answer()
+
+    mode, url = call.data.split("|")
+
+    await call.message.answer("⬇️ در حال دانلود...")
+
+    try:
+        file_path = await asyncio.to_thread(download_video, url, "mp3" if mode == "mp3" else "mp4")
+
+        await call.message.answer("📤 ارسال فایل...")
+
+        if mode == "mp3":
+            await call.message.answer_audio(types.FSInputFile(file_path))
+        else:
+            await call.message.answer_video(types.FSInputFile(file_path))
+
+    except Exception as e:
+        await call.message.answer(f"❌ خطا:\n{e}")
 
 
 # ================= RUN =================
 async def main():
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
